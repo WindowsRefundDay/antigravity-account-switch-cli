@@ -1,0 +1,16 @@
+{
+  "name": "antigravity-account-switch-cli",
+  "version": "1.0.0",
+  "description": "Dynamic, cross-platform keychain credential swapper and Google OAuth session refresher for the Antigravity CLI (agy).",
+  "main": "agysw.js",
+  "type": "module",
+  "bin": {
+    "agysw": "./agysw.js"
+  },
+  "author": "Joel Manuel <joeljmanuel@gmail.com>",
+  "license": "MIT",
+  "dependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}

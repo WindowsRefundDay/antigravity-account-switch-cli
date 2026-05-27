@@ -1,0 +1,16 @@
+{
+  "name": "antigravity-account-switch-cli",
+  "version": "1.0.0",
+  "description": "Cross-platform Antigravity multi-account session rotation and profile switching CLI command.",
+  "author": {
+    "name": "Joel Manuel",
+    "email": "joeljmanuel@gmail.com"
+  },
+  "keywords": [
+    "antigravity",
+    "agy",
+    "multi-account",
+    "keychain",
+    "profile-switching"
+  ]
+}
