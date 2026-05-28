@@ -13,7 +13,11 @@ import os from 'os';
 
 const CLIENT_ID = process.env.ANTIGRAVITY_CLIENT_ID || ["1071006060591-tmhssin2h21lcre235vtolojh4g403ep", "apps.googleusercontent.com"].join(".");
 const CLIENT_SECRET = process.env.ANTIGRAVITY_CLIENT_SECRET || ["GOCSPX", "K58FWR486LdLJ1mLB8sXC4z6qDAf"].join("-");
-const ACCOUNTS_PATH = join(os.homedir(), '.pi', 'agent', 'antigravity-accounts.json');
+
+// Default path matches where agy stores its accounts database.
+// Override with AGYSW_ACCOUNTS_PATH env var if your install differs.
+const ACCOUNTS_PATH = process.env.AGYSW_ACCOUNTS_PATH
+  || join(os.homedir(), '.pi', 'agent', 'antigravity-accounts.json');
 
 async function readAccountsStorage() {
   try {
@@ -98,6 +102,7 @@ async function doSwitch(index, storage) {
     
     storage.activeIndex = index;
     storage.activeIndexByFamily = { ...storage.activeIndexByFamily, gemini: index, claude: index };
+    storage.accounts[index].lastUsed = Date.now();
     await writeAccountsStorage(storage);
 
     console.log(`[Success] Actively switched CLI credentials to: ${account.email}`);
@@ -115,9 +120,15 @@ async function main() {
     console.log(`
 Antigravity CLI Multi-Account Switcher (agysw)
 Usage:
-  node agysw.js list                  - List all available profiles
-  node agysw.js switch <index|email>  - Switch the active CLI profile manually
-  node agysw.js rotate                - Automatically rotate active profile (round-robin / random / sticky)
+  node agysw.js list                           - List all profiles with status
+  node agysw.js current                        - Show active account
+  node agysw.js switch <index|email>           - Switch to specific account
+  node agysw.js rotate                         - Rotate using current strategy (default: round-robin)
+  node agysw.js rotate --strategy=<s>          - Rotate with specific strategy (one-time)
+  node agysw.js rotate --force                 - Force advance even if only one healthy account
+  node agysw.js strategy [round-robin|random|sticky|least-used]
+                                               - View or set default rotation strategy
+  node agysw.js cooldown [hours=4]             - Mark current exhausted, rotate to next
     `);
     process.exit(0);
   }
@@ -164,34 +175,113 @@ Usage:
   }
 
   if (command === 'rotate') {
-    const now = Date.now();
-    const healthyIndices = storage.accounts
-      .map((a, i) => ({ a, i }))
-      .filter(({ a }) => !a.cooldownUntil || a.cooldownUntil < now)
-      .map(({ i }) => i);
+    const force = args.includes('--force');
+    // --strategy=round-robin|random|sticky|least-used (default: round-robin)
+    const strategyArg = args.find(a => a.startsWith('--strategy='));
+    const strategy = strategyArg ? strategyArg.split('=')[1] : (storage.rotateStrategy || 'round-robin');
 
-    if (healthyIndices.length === 0) {
+    const now = Date.now();
+    const healthyEntries = storage.accounts
+      .map((a, i) => ({ a, i }))
+      .filter(({ a }) => !a.disabled && (!a.cooldownUntil || a.cooldownUntil < now));
+
+    if (healthyEntries.length === 0) {
       console.error("Error: All accounts are in rate-limit cooldown. Cannot rotate.");
       process.exit(1);
     }
 
-    // Default strategy is round-robin cycling
+    const healthyIndices = healthyEntries.map(({ i }) => i);
     const currentIndex = storage.activeIndex ?? 0;
-    let targetIndex = healthyIndices[0]; // fallback default
+    let targetIndex;
 
-    // Sequentially search for next healthy index (Round Robin strategy)
-    const nextIdxInSequence = healthyIndices.find(idx => idx > currentIndex);
-    if (nextIdxInSequence !== undefined) {
-      targetIndex = nextIdxInSequence;
+    if (strategy === 'sticky') {
+      // Stay on current if healthy; only switch if exhausted
+      if (healthyIndices.includes(currentIndex)) {
+        process.exit(0); // already on healthy, stay
+      }
+      const next = healthyIndices.find(i => i > currentIndex) ?? healthyIndices[0];
+      targetIndex = next;
+
+    } else if (strategy === 'random') {
+      // Pick random healthy account (excluding current unless only option)
+      const others = healthyIndices.filter(i => i !== currentIndex);
+      const pool = others.length > 0 ? others : healthyIndices;
+      targetIndex = pool[Math.floor(Math.random() * pool.length)];
+
+    } else if (strategy === 'least-used') {
+      // Pick healthy account with oldest lastUsed timestamp
+      const candidates = healthyEntries.filter(({ i }) => i !== currentIndex || healthyEntries.length === 1);
+      candidates.sort((a, b) => (a.a.lastUsed || 0) - (b.a.lastUsed || 0));
+      targetIndex = candidates[0].i;
+
+    } else {
+      // Default: round-robin — always advance to next healthy past current
+      const next = healthyIndices.find(i => i > currentIndex);
+      targetIndex = next !== undefined ? next : healthyIndices[0]; // wrap around
     }
 
-    if (targetIndex === currentIndex) {
-      console.log(`Current active account (${storage.accounts[currentIndex].email}) is healthy. Remaining sticky.`);
+    if (targetIndex === currentIndex && !force) {
+      // Only one healthy account — no choice but to stay
       process.exit(0);
     }
 
-    console.log(`Dynamically auto-rotating CLI credentials...`);
     await doSwitch(targetIndex, storage);
+  }
+
+  if (command === 'strategy') {
+    // Persist the default rotate strategy
+    const newStrategy = args[1];
+    const valid = ['round-robin', 'random', 'sticky', 'least-used'];
+    if (!newStrategy || !valid.includes(newStrategy)) {
+      const current = storage.rotateStrategy || 'round-robin';
+      console.log(`Current strategy: ${current}`);
+      console.log(`Valid strategies: ${valid.join(', ')}`);
+      process.exit(0);
+    }
+    storage.rotateStrategy = newStrategy;
+    await writeAccountsStorage(storage);
+    console.log(`[agysw] Rotate strategy set to: ${newStrategy}`);
+    process.exit(0);
+  }
+
+  if (command === 'cooldown') {
+    // Mark current account as rate-limited and rotate to next healthy account
+    const hours = parseFloat(args[1]) || 4;
+    const cooldownUntil = Date.now() + hours * 60 * 60 * 1000;
+    const currentIndex = storage.activeIndex ?? 0;
+    const currentAccount = storage.accounts[currentIndex];
+    if (!currentAccount) {
+      console.error("Error: No active account found.");
+      process.exit(1);
+    }
+    currentAccount.cooldownUntil = cooldownUntil;
+    await writeAccountsStorage(storage);
+    console.log(`[agysw] Marked ${currentAccount.email} on cooldown for ${hours}h (until ${new Date(cooldownUntil).toLocaleTimeString()}).`);
+
+    // Now rotate to next healthy
+    const now = Date.now();
+    const healthyIndices = storage.accounts
+      .map((a, i) => ({ a, i }))
+      .filter(({ a, i }) => i !== currentIndex && !a.disabled && (!a.cooldownUntil || a.cooldownUntil < now))
+      .map(({ i }) => i);
+
+    if (healthyIndices.length === 0) {
+      console.error("[agysw] No healthy accounts remaining. All on cooldown.");
+      process.exit(1);
+    }
+
+    // Pick next healthy account after current
+    const next = healthyIndices.find(i => i > currentIndex) ?? healthyIndices[0];
+    await doSwitch(next, storage);
+  }
+
+  if (command === 'current') {
+    const idx = storage.activeIndex ?? 0;
+    const acc = storage.accounts[idx];
+    if (!acc) { console.log("No active account."); process.exit(0); }
+    const now = Date.now();
+    const cd = acc.cooldownUntil && acc.cooldownUntil > now;
+    console.log(`Active: ${idx + 1}. ${acc.email}${cd ? ` (COOLDOWN until ${new Date(acc.cooldownUntil).toLocaleTimeString()})` : ' ✓'}`);
   }
 
   if (command === 'update') {

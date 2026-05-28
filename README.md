@@ -1,55 +1,99 @@
-# Antigravity CLI Multi-Account Switcher & Auto-Rotator (`agysw`)
+# agysw — Antigravity CLI Account Switcher
 
-A high-performance, dynamic, cross-platform keychain credential swapper and Google OAuth session refresher for the **Antigravity CLI (`agy`)**.
+Manages multiple Google accounts for the **Antigravity CLI (`agy`)**. When one account hits its daily quota, `agysw` rotates to the next healthy one automatically — no re-login required.
 
-## 🌍 Platform Compatibility
-* **macOS:** Modifies the system Keyring entries natively utilizing the `security` command line.
-* **Linux:** Modifies the system D-Bus Secret Service natively utilizing `secret-tool` (`libsecret-tools`).
+**Platforms:** macOS (Keychain) · Linux (libsecret / secret-tool)
 
 ---
 
-## 🚀 Installation & Setup
+## How it works
 
-1. Clone or import this plugin inside your local **Antigravity CLI (`agy`)**:
-   ```bash
-   agy plugin install /path/to/antigravity-account-switch-cli
-   ```
-
-2. Verify installation:
-   ```bash
-   agy plugin list
-   ```
+`agy` reads its active session from the system keyring (`service=gemini`, `account=antigravity`).  
+`agysw` refreshes the OAuth token for the target account and writes it directly into the keyring.  
+The next `agy` command picks it up instantly.
 
 ---
 
-## 💻 Commands
+## Installation
 
-### 1. List Available Profiles
-See all configured accounts in your local pool, identifying the active profile and rate-limit cooldown status:
+**As an agy plugin:**
 ```bash
-node agysw.js list
+agy plugin install /path/to/antigravity-account-switch-cli
 ```
 
-### 2. Manual Profile Switch
-Directly switch CLI credentials by specifying the index number or email address:
+**Standalone:**
 ```bash
-# Switch by Index
-node agysw.js switch 2
-
-# Switch by Email
-node agysw.js switch jojomon23@gmail.com
+git clone https://github.com/WindowsRefundDay/antigravity-account-switch-cli
+ln -s "$(pwd)/antigravity-account-switch-cli/agysw.js" ~/.local/bin/agysw
+chmod +x ~/.local/bin/agysw
 ```
 
-### 3. Dynamic Autoswitch / Auto-rotation
-Checks your account health pool, identifies which account is currently active, and automatically switches sequentially to the next healthy account (skipping any in active rate-limit cooldowns):
+**Recommended shell wrapper** (add to `~/.zshrc` / `~/.bashrc`):
 ```bash
-node agysw.js rotate
+# Rotates to the next account before every agy session
+agy() {
+  agysw rotate > /dev/null 2>&1
+  /path/to/agy-binary "$@"
+}
+
+# Run this when agy says "Individual quota reached"
+agycool() {
+  agysw cooldown "${1:-4}"
+}
 ```
 
 ---
 
-## 🛠️ How it works
-The `agy` CLI retrieves active sessions from standard platform keyring systems under `service="gemini"` and `account="antigravity"`. 
+## Commands
 
-The switcher dynamically fetches the credential database, runs a fast Google API OAuth refresh handshake to renew tokens, builds the appropriate base64 envelope, and natively updates your machine's secure keychain. 
-Your next CLI command executes instantly under the target session!
+| Command | What it does |
+|---|---|
+| `agysw list` | Show all accounts with active/cooldown status |
+| `agysw current` | Show which account is active right now |
+| `agysw switch <n\|email>` | Switch to account by index or email address |
+| `agysw rotate` | Advance to the next healthy account (uses saved strategy) |
+| `agysw cooldown [hours]` | Mark current account exhausted for N hours, then rotate |
+| `agysw strategy [name]` | View or set the default rotation strategy |
+| `agysw update` | Pull the latest version from GitHub |
+
+---
+
+## Rotation strategies
+
+Set once with `agysw strategy <name>`, or override per-call with `agysw rotate --strategy=<name>`.
+
+| Strategy | Behavior |
+|---|---|
+| `round-robin` | Advance to next healthy account in order, wrap around at the end *(default)* |
+| `random` | Pick a random healthy account each time |
+| `sticky` | Stay on the current account until it's exhausted, then switch |
+| `least-used` | Always pick whichever healthy account was used longest ago |
+
+```bash
+agysw strategy random              # set default
+agysw rotate --strategy=sticky     # one-time override
+agysw rotate --force               # advance even if only one healthy account exists
+```
+
+---
+
+## Handling quota exhaustion
+
+When `agy` returns `Individual quota reached`:
+
+```bash
+agycool        # marks current account exhausted for 4h, switches to next healthy account
+agycool 2      # same but 2h cooldown
+```
+
+Cooldowns are stored in the accounts database and respected by all rotate strategies.
+
+---
+
+## Configuration
+
+| Environment variable | Default | Description |
+|---|---|---|
+| `AGYSW_ACCOUNTS_PATH` | `~/.pi/agent/antigravity-accounts.json` | Path to agy's accounts database |
+| `ANTIGRAVITY_CLIENT_ID` | *(bundled)* | Override the OAuth client ID |
+| `ANTIGRAVITY_CLIENT_SECRET` | *(bundled)* | Override the OAuth client secret |

@@ -1,0 +1,4 @@
+node_modules/
+*.json.tmp
+*.json.bak
+.DS_Store
